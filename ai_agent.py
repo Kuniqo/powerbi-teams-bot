@@ -16,6 +16,7 @@ Flow:
 import json
 import logging
 import os
+import threading
 from collections import deque
 from typing import Any
 
@@ -194,7 +195,8 @@ class AIAgent:
         self._pbi = pbi_client
         # Per-user conversation history: user_id → deque of message dicts
         self._histories: dict[str, deque] = {}
-        # Load datasets config once
+        # Load datasets config (thread-safe reloading)
+        self._config_lock = threading.Lock()
         self._datasets_config = self._load_datasets_config()
         # Build LLM client(s)
         self._provider = config.LLM_PROVIDER
@@ -277,18 +279,61 @@ class AIAgent:
             logger.error("Could not load datasets_config.json: %s", exc)
             return {"datasets": []}
 
-    def _find_dataset(self, name: str) -> dict[str, Any] | None:
+    def reload_config(self, new_config: dict[str, Any] | None = None) -> None:
+        """Reload datasets config from disk or from a provided dict (thread-safe)."""
+        with self._config_lock:
+            if new_config is not None:
+                self._datasets_config = new_config
+            else:
+                self._datasets_config = self._load_datasets_config()
+            count = len(self._datasets_config.get("datasets", []))
+            logger.info("Datasets config reloaded: %d datasets", count)
+
+    def _find_dataset(self, name: str, user_email: str = "") -> dict[str, Any] | None:
         for ds in self._datasets_config.get("datasets", []):
             if ds["name"].lower() == name.lower():
+                if user_email and not self._user_has_access(ds, user_email):
+                    return None
                 return ds
         return None
 
+    @staticmethod
+    def _user_has_access(dataset: dict, user_email: str) -> bool:
+        """Check if a user has access to a dataset based on the access config."""
+        access = dataset.get("access")
+        if not access:
+            return True  # No access config = open access
+
+        mode = access.get("mode", "allowlist")
+        users = [u.lower() for u in access.get("users", [])]
+        # groups support placeholder — extend with Entra ID group lookup if needed
+        # groups = access.get("groups", [])
+
+        if "*" in users:
+            return True  # Wildcard = everyone has access
+
+        user_lower = user_email.lower()
+
+        if mode == "allowlist":
+            return user_lower in users
+        elif mode == "denylist":
+            return user_lower not in users
+
+        return True
+
+    def _get_accessible_datasets(self, user_email: str = "") -> list[dict]:
+        """Return only datasets the user has access to."""
+        all_datasets = self._datasets_config.get("datasets", [])
+        if not user_email:
+            return all_datasets
+        return [ds for ds in all_datasets if self._user_has_access(ds, user_email)]
+
     # ── Tool execution ─────────────────────────────────────────────────────
 
-    def _tool_list_datasets(self) -> str:
-        datasets = self._datasets_config.get("datasets", [])
+    def _tool_list_datasets(self, user_email: str = "") -> str:
+        datasets = self._get_accessible_datasets(user_email)
         if not datasets:
-            return "No hay datasets configurados."
+            return "No tienes acceso a ningún dataset configurado."
         lines = []
         for ds in datasets:
             lines.append(
@@ -298,10 +343,10 @@ class AIAgent:
             )
         return "\n".join(lines)
 
-    def _tool_get_schema(self, dataset_name: str) -> str:
-        ds = self._find_dataset(dataset_name)
+    def _tool_get_schema(self, dataset_name: str, user_email: str = "") -> str:
+        ds = self._find_dataset(dataset_name, user_email)
         if not ds:
-            return f"Dataset '{dataset_name}' no encontrado."
+            return f"Dataset '{dataset_name}' no encontrado o no tienes acceso."
         schema = ds.get("schema", {})
         tables = schema.get("tables", [])
         relationships = schema.get("relationships", [])
@@ -325,10 +370,10 @@ class AIAgent:
 
         return "\n".join(lines)
 
-    async def _tool_execute_dax(self, dataset_name: str, dax_query: str) -> str:
-        ds = self._find_dataset(dataset_name)
+    async def _tool_execute_dax(self, dataset_name: str, dax_query: str, user_email: str = "") -> str:
+        ds = self._find_dataset(dataset_name, user_email)
         if not ds:
-            return f"Dataset '{dataset_name}' no encontrado en la configuración."
+            return f"Dataset '{dataset_name}' no encontrado en la configuración o no tienes acceso."
 
         workspace_id = ds.get("workspace_id", "")
         dataset_id = ds.get("dataset_id", "")
@@ -348,7 +393,7 @@ class AIAgent:
             logger.exception("Error executing DAX query")
             return f"Error al ejecutar la query DAX: {exc}"
 
-    async def _dispatch_tool(self, name: str, arguments: str | dict) -> str:
+    async def _dispatch_tool(self, name: str, arguments: str | dict, user_email: str = "") -> str:
         """Parse arguments and call the appropriate tool function."""
         try:
             if isinstance(arguments, str):
@@ -359,13 +404,14 @@ class AIAgent:
             return "Error: argumentos inválidos (JSON mal formado)."
 
         if name == "list_available_datasets":
-            return self._tool_list_datasets()
+            return self._tool_list_datasets(user_email)
         elif name == "get_dataset_schema":
-            return self._tool_get_schema(args.get("dataset_name", ""))
+            return self._tool_get_schema(args.get("dataset_name", ""), user_email)
         elif name == "execute_dax_query":
             return await self._tool_execute_dax(
                 dataset_name=args.get("dataset_name", ""),
                 dax_query=args.get("dax_query", ""),
+                user_email=user_email,
             )
         else:
             return f"Herramienta desconocida: {name}"
@@ -387,19 +433,19 @@ class AIAgent:
 
     # ── Main entry point ───────────────────────────────────────────────────
 
-    async def process_message(self, user_id: str, user_text: str) -> str:
+    async def process_message(self, user_id: str, user_text: str, user_email: str = "") -> str:
         """
         Translate a user message to a DAX query, execute it, and return a
         human-friendly Spanish response.
         """
         if self._provider == "claude":
-            return await self._process_message_claude(user_id, user_text)
+            return await self._process_message_claude(user_id, user_text, user_email)
         else:
-            return await self._process_message_openai(user_id, user_text)
+            return await self._process_message_openai(user_id, user_text, user_email)
 
     # ── OpenAI-compatible flow (OpenAI, Azure, Gemini, Perplexity) ────────
 
-    async def _process_message_openai(self, user_id: str, user_text: str) -> str:
+    async def _process_message_openai(self, user_id: str, user_text: str, user_email: str = "") -> str:
         """Function-calling loop using OpenAI-compatible API."""
         history = self._get_history(user_id)
         self._append_history(user_id, {"role": "user", "content": user_text})
@@ -439,6 +485,7 @@ class AIAgent:
                     tool_result = await self._dispatch_tool(
                         name=tool_call.function.name,
                         arguments=tool_call.function.arguments,
+                        user_email=user_email,
                     )
                     logger.debug(
                         "Tool '%s' result (truncated): %s",
@@ -466,7 +513,7 @@ class AIAgent:
 
     # ── Claude/Anthropic flow ─────────────────────────────────────────────
 
-    async def _process_message_claude(self, user_id: str, user_text: str) -> str:
+    async def _process_message_claude(self, user_id: str, user_text: str, user_email: str = "") -> str:
         """Function-calling loop using the Anthropic SDK."""
         history = self._get_history(user_id)
         self._append_history(user_id, {"role": "user", "content": user_text})
@@ -524,6 +571,7 @@ class AIAgent:
                         tool_result = await self._dispatch_tool(
                             name=block.name,
                             arguments=block.input,
+                            user_email=user_email,
                         )
                         logger.debug(
                             "Tool '%s' result (truncated): %s",

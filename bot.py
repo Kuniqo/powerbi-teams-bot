@@ -81,6 +81,15 @@ class PowerBIBot(ActivityHandler):
             if turn_context.activity.from_property
             else "default_user"
         )
+        # Extract user email from Teams activity (used for dataset access control)
+        user_email = ""
+        if turn_context.activity.from_property:
+            # In Teams, the email is in from_property.aad_object_id or name field
+            # The UPN (email) is typically available in the activity
+            user_email = getattr(turn_context.activity.from_property, 'name', '') or ""
+            # If name looks like an email, use it; otherwise try aad_object_id
+            if '@' not in user_email:
+                user_email = getattr(turn_context.activity.from_property, 'aad_object_id', '') or ""
 
         if not user_text:
             return
@@ -97,7 +106,7 @@ class PowerBIBot(ActivityHandler):
         await self._send_typing(turn_context)
 
         try:
-            response_text = await self._agent.process_message(user_id, user_text)
+            response_text = await self._agent.process_message(user_id, user_text, user_email)
         except Exception as exc:  # pylint: disable=broad-except
             logger.exception("Error in AI agent for user %s", user_id)
             response_text = (
