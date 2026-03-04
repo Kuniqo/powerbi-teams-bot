@@ -1,0 +1,41 @@
+{
+    "datasets": [
+        {
+            "name": "Health Ambassadors",
+            "workspace_id": "18844bf0-b40d-46f9-bed7-109061fc79ab",
+            "dataset_id": "6a1ba09e-eb8e-4609-87e4-7bc99868b11f",
+            "description": "Dataset con información de Health Ambassadors, pacientes, seguros y asignaciones.",
+            "schema": {
+                "tables": [
+                    {
+                        "name": "Patients",
+                        "description": "Tabla de pacientes con sus datos demográficos y de seguro",
+                        "columns": [
+                            {"name": "PatientID", "type": "Int64", "description": "ID único del paciente"},
+                            {"name": "PatientName", "type": "String", "description": "Nombre del paciente"},
+                            {"name": "PrimaryInsurance", "type": "String", "description": "Seguro primario (ej: Devoted, Aetna, Humana)"},
+                            {"name": "Status", "type": "String", "description": "Estado (Active, Inactive)"}
+                        ]
+                    },
+                    {
+                        "name": "HealthAmbassadors",
+                        "description": "Tabla de Health Ambassadors y sus asignaciones",
+                        "columns": [
+                            {"name": "AmbassadorID", "type": "Int64", "description": "ID del ambassador"},
+                            {"name": "AmbassadorName", "type": "String", "description": "Nombre del Health Ambassador"},
+                            {"name": "PatientID", "type": "Int64", "description": "ID del paciente asignado"}
+                        ]
+                    }
+                ],
+                "relationships": [
+                    {
+                        "from_table": "HealthAmbassadors",
+                        "from_column": "PatientID",
+                        "to_table": "Patients",
+                        "to_column": "PatientID"
+                    }
+                ]
+            }
+        }
+    ]
+}

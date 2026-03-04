@@ -1,0 +1,54 @@
+{
+    "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+    "manifestVersion": "1.16",
+    "version": "1.0.0",
+    "id": "{{APP_ID}}",
+    "developer": {
+        "name": "MyDoctor",
+        "websiteUrl": "https://mydoctortampa.com",
+        "privacyUrl": "https://mydoctortampa.com/privacy",
+        "termsOfUseUrl": "https://mydoctortampa.com/terms"
+    },
+    "name": {
+        "short": "Power BI Assistant",
+        "full": "Power BI Data Assistant"
+    },
+    "description": {
+        "short": "Consulta datos de Power BI usando lenguaje natural",
+        "full": "Bot de asistencia que permite consultar datasets de Power BI haciendo preguntas en lenguaje natural. Traduce automáticamente tus preguntas a DAX y te devuelve los resultados."
+    },
+    "icons": {
+        "outline": "outline.png",
+        "color": "color.png"
+    },
+    "accentColor": "#F2C811",
+    "bots": [
+        {
+            "botId": "{{APP_ID}}",
+            "scopes": ["personal", "team", "groupChat"],
+            "supportsFiles": false,
+            "isNotificationOnly": false,
+            "commandLists": [
+                {
+                    "scopes": ["personal"],
+                    "commands": [
+                        {
+                            "title": "consultar",
+                            "description": "Haz una pregunta sobre los datos"
+                        },
+                        {
+                            "title": "datasets",
+                            "description": "Ver datasets disponibles"
+                        },
+                        {
+                            "title": "ayuda",
+                            "description": "Ver instrucciones de uso"
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "permissions": ["identity", "messageTeamMembers"],
+    "validDomains": []
+}
