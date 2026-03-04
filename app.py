@@ -10,6 +10,7 @@ Sets up:
 """
 
 import logging
+import os
 import sys
 from http import HTTPStatus
 
@@ -80,13 +81,19 @@ async def on_startup(app: web.Application) -> None:
 
     config = load_config()
 
-    # Bot Framework adapter
+    # Bot Framework adapter (SingleTenant requires app_type and app_tenancy)
+    app_type = os.environ.get("APP_TYPE", "SingleTenant")
+    app_tenancy = os.environ.get("APP_TENANTID", "")
+
     _adapter = BotFrameworkAdapter(
         BotFrameworkAdapterSettings(
             app_id=config.APP_ID,
             app_password=config.APP_PASSWORD,
+            app_type=app_type,
+            app_tenancy=app_tenancy,
         )
     )
+    logger.info("Bot adapter configured: app_type=%s, tenant=%s", app_type, app_tenancy)
 
     async def on_error(context, error):
         logger.exception("Unhandled error in bot turn: %s", error)
