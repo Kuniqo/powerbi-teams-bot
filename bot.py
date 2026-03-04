@@ -15,6 +15,11 @@ from typing import List
 from botbuilder.core import ActivityHandler, TurnContext
 from botbuilder.schema import Activity, ActivityTypes, ChannelAccount
 
+try:
+    from botbuilder.core.teams import TeamsInfo
+except ImportError:
+    TeamsInfo = None  # type: ignore[assignment, misc]
+
 from ai_agent import AIAgent
 
 logger = logging.getLogger(__name__)
@@ -82,14 +87,11 @@ class PowerBIBot(ActivityHandler):
             else "default_user"
         )
         # Extract user email from Teams activity (used for dataset access control)
-        user_email = ""
-        if turn_context.activity.from_property:
-            # In Teams, the email is in from_property.aad_object_id or name field
-            # The UPN (email) is typically available in the activity
-            user_email = getattr(turn_context.activity.from_property, 'name', '') or ""
-            # If name looks like an email, use it; otherwise try aad_object_id
-            if '@' not in user_email:
-                user_email = getattr(turn_context.activity.from_property, 'aad_object_id', '') or ""
+        user_email = await self._get_user_email(turn_context)
+        logger.info(
+            "Message from user_id=%s, resolved_email=%s, channel=%s",
+            user_id, user_email or "(empty)", turn_context.activity.channel_id,
+        )
 
         if not user_text:
             return
@@ -122,6 +124,44 @@ class PowerBIBot(ActivityHandler):
             )
 
     # ── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _get_user_email(turn_context: TurnContext) -> str:
+        """Get the user's email/UPN from Teams.
+        
+        Priority:
+        1. TeamsInfo.get_member (most reliable — returns the real UPN/email)
+        2. activity.from_property.name (sometimes contains email in Teams)
+        3. Empty string (fallback — open access mode)
+        """
+        # Try Teams roster API first
+        if TeamsInfo and turn_context.activity.channel_id == "msteams":
+            try:
+                member = await TeamsInfo.get_member(
+                    turn_context,
+                    turn_context.activity.from_property.id,
+                )
+                # member.user_principal_name is the UPN (email)
+                upn = getattr(member, 'user_principal_name', None) or ""
+                if upn and '@' in upn:
+                    logger.info("Resolved Teams user email via roster: %s", upn)
+                    return upn.lower()
+                # Fallback to member.email
+                email = getattr(member, 'email', None) or ""
+                if email and '@' in email:
+                    logger.info("Resolved Teams user email via member.email: %s", email)
+                    return email.lower()
+            except Exception as exc:
+                logger.warning("Could not fetch Teams member info: %s", exc)
+
+        # Fallback: check from_property fields
+        if turn_context.activity.from_property:
+            name = getattr(turn_context.activity.from_property, 'name', '') or ""
+            if '@' in name:
+                return name.lower()
+
+        logger.warning("Could not determine user email — access control will use open mode")
+        return ""
 
     @staticmethod
     async def _send_typing(turn_context: TurnContext) -> None:

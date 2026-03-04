@@ -23,12 +23,12 @@ from typing import Any
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 
 from config import Config
-from powerbi_client import PowerBIClient
+from powerbi_client import PowerBIClient, PowerBIQueryError
 
 logger = logging.getLogger(__name__)
 
 _DATASETS_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "datasets_config.json")
-MAX_ITERATIONS = 5
+MAX_ITERATIONS = 8  # messages per iteration (increased to allow error-correction loops)
 MAX_HISTORY = 20  # messages per user (system msg not counted)
 
 # ── System prompt ────────────────────────────────────────────────────────────
@@ -37,23 +37,67 @@ _SYSTEM_PROMPT = """\
 Eres un analista de datos experto que ayuda a los usuarios a consultar datos de Power BI.
 Cuando un usuario te hace una pregunta sobre datos:
 1. Primero usa list_available_datasets para ver qué datos hay disponibles
-2. Usa get_dataset_schema para entender la estructura de tablas y columnas
-3. Traduce la pregunta del usuario a una query DAX correcta
-4. Ejecuta la query con execute_dax_query
+2. Usa get_dataset_schema para entender la estructura de tablas y columnas relevantes
+3. Traduce la pregunta del usuario a una query DAX correcta y ejecuta con execute_dax_query
+4. Si hay un error DAX, lee el mensaje de error, corrige la query y reintenta
 5. Presenta los resultados de forma clara y amigable
 
-Reglas DAX importantes:
-- Siempre usa EVALUATE para retornar una tabla
-- Usa SUMMARIZECOLUMNS para agregaciones con agrupamiento
-- Usa CALCULATETABLE o FILTER para tablas filtradas
-- Las referencias a columnas usan la sintaxis 'NombreTabla'[NombreColumna]
-- Las comparaciones de strings en DAX son case-insensitive por defecto
-- Usa TOPN para consultas top-N
-- Para contar valores distintos usa DISTINCTCOUNT
-- Para contar filas usa COUNTROWS
-- Para una fila de resultado singular usa ROW("NombreColumna", expresión)
+=== REGLAS DAX CRÍTICAS ===
 
-Responde siempre en español. Si hay un error, explícalo de forma simple.\
+Sintaxis general:
+- Toda query debe comenzar con EVALUATE
+- Referencias a columnas: 'NombreTabla'[NombreColumna]
+- Las comillas simples en nombres de tabla son OBLIGATORIAS si el nombre tiene espacios
+- Strings literales van entre comillas dobles: "valor"
+
+SUMMARIZECOLUMNS (la función más común para agregaciones):
+Sintaxis correcta:
+  EVALUATE SUMMARIZECOLUMNS(
+    'Tabla'[ColumnaGrupo1],        -- columnas de agrupación (SOLO columnas reales)
+    'Tabla'[ColumnaGrupo2],        -- más columnas de agrupación (opcional)
+    "NombreMedida", COUNTROWS('Tabla'),  -- pares "nombre", expresión
+    "OtraMedida", SUM('Tabla'[Monto])    -- más pares (opcional)
+  )
+
+ERRORES COMUNES en SUMMARIZECOLUMNS que DEBES EVITAR:
+- ❌ NO pases una expresión como argumento de agrupación, solo columnas reales de tablas
+- ❌ NO mezcles filtros inline dentro de SUMMARIZECOLUMNS; usa CALCULATETABLE + FILTER afuera
+- ❌ NO uses columnas calculadas o medidas como argumento de agrupación
+- ✅ Los argumentos de agrupación SIEMPRE deben ser 'Tabla'[Columna] existentes en el esquema
+- ✅ Los pares nombre-expresión van AL FINAL: "NombreResultado", EXPRESION_DAX
+
+Para filtrar resultados:
+  EVALUATE
+  CALCULATETABLE(
+    SUMMARIZECOLUMNS(
+      'Tabla'[Columna],
+      "Total", COUNTROWS('Tabla')
+    ),
+    'Tabla'[Columna] = "valor"
+  )
+
+Para un solo valor escalar:
+  EVALUATE ROW("Resultado", COUNTROWS('Tabla'))
+
+Para top N:
+  EVALUATE TOPN(10, SUMMARIZECOLUMNS(...), [NombreMedida], DESC)
+
+Para tablas filtradas sin agregación:
+  EVALUATE FILTER('Tabla', 'Tabla'[Columna] = "valor")
+
+Para fechas recientes (últimos N días):
+  EVALUATE
+  CALCULATETABLE(
+    SUMMARIZECOLUMNS(...),
+    'Tabla'[FechaColumna] >= DATE(2026, 1, 1)
+  )
+
+Si una query DAX falla, analiza el error y corrige. Errores comunes:
+- "expects a column name" → Estás pasando una expresión donde debe ir una columna
+- "column does not exist" → Verifica el nombre exacto en el esquema
+- "table not found" → Usa comillas simples: 'Nombre Tabla'
+
+Responde siempre en español. Sé conciso con los datos y presenta tablas cuando sea apropiado.\
 """
 
 # ── Tool definitions (OpenAI format — used by OpenAI, Azure, Gemini, Perplexity) ──
@@ -389,6 +433,13 @@ class AIAgent:
             )
             formatted = PowerBIClient.format_results(response)
             return formatted
+        except PowerBIQueryError as pbi_err:
+            logger.warning("DAX query error (will feed back to LLM): %s", pbi_err)
+            return (
+                f"ERROR en la query DAX: {pbi_err}\n"
+                f"Query enviada: {dax_query}\n"
+                "Por favor corrige la query DAX y reintenta."
+            )
         except Exception as exc:  # pylint: disable=broad-except
             logger.exception("Error executing DAX query")
             return f"Error al ejecutar la query DAX: {exc}"

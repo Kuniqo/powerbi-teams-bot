@@ -23,6 +23,11 @@ _PBI_SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
 _PBI_BASE = "https://api.powerbi.com/v1.0/myorg"
 
 
+class PowerBIQueryError(Exception):
+    """Raised when a DAX query fails. Contains the detailed error message."""
+    pass
+
+
 class PowerBIClient:
     """Thin async wrapper around the Power BI REST API."""
 
@@ -86,12 +91,26 @@ class PowerBIClient:
         response = await self._http.post(url, json=payload, headers=headers)
 
         if response.status_code != 200:
+            error_body = response.text
             logger.error(
                 "Power BI executeQueries failed: %s %s",
                 response.status_code,
-                response.text,
+                error_body,
             )
-            response.raise_for_status()
+            # Parse error detail for better LLM feedback
+            try:
+                import json as _json
+                err_data = _json.loads(error_body)
+                pbi_error = err_data.get("error", {})
+                details = pbi_error.get("pbi.error", {}).get("details", [])
+                detail_msgs = [d.get("detail", {}).get("value", "") for d in details if d.get("detail", {}).get("value")]
+                if detail_msgs:
+                    raise PowerBIQueryError(
+                        f"Error DAX ({response.status_code}): {'; '.join(detail_msgs)}"
+                    )
+            except (ValueError, KeyError):
+                pass
+            raise PowerBIQueryError(f"Error Power BI ({response.status_code}): {error_body[:500]}")
 
         return response.json()
 
